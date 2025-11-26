@@ -1,0 +1,649 @@
+---
+title: "Situational Awareness and Learning Tool"
+execute: 
+  echo: false
+  warning: false
+  message: false
+  error: false
+format: 
+  dashboard:
+    theme: default
+    scrolling: false
+    self-contained: true
+---
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+
+# ============================== Libraries ==============================
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(lubridate)
+  library(janitor)
+  library(zoo)
+  library(patchwork)
+  library(ggplot2)
+  library(RSocrata)
+  library(stringr)
+  library(knitr)
+
+})
+
+# ============================== Global params ==============================
+cutoff_date    <- as.Date("2023-10-01")     # keep Oct 2023+
+smooth_window  <- 2
+target_state   <- "OHIO"                    # ED visits panel
+SOCRATA_TOKEN  <- Sys.getenv("ftT1cQCSr7QsiHsOZZvrBCgaW", "") # optional but helpful
+
+# ============================== Regions (1–8) ==============================
+regions <- list(
+  `1` = tibble::tibble(
+    county = c("Mercer","Auglaize","Van Wert","Allen","Paulding","Putnam","Defiance","Henry",
+               "Williams","Fulton","Lucas","Wood","Hancock","Ottawa","Sandusky","Seneca","Erie","Huron"),
+    fips   = c("39107","39011","39161","39003","39125","39137","39039","39069",
+               "39171","39051","39095","39173","39063","39123","39143","39147","39043","39077")
+  ),
+  `2` = tibble::tibble(
+    county = c("Lorain","Cuyahoga","Geauga","Lake","Ashtabula"),
+    fips   = c("39093","39035","39055","39085","39007")
+  ),
+  `3` = tibble::tibble(
+    county = c("Darke","Shelby","Miami","Champaign","Clark","Preble","Montgomery","Greene"),
+    fips   = c("39037","39149","39109","39021","39023","39135","39113","39057")
+  ),
+  `4` = tibble::tibble(
+    county = c("Wyandot","Crawford","Hardin","Marion","Morrow","Knox","Logan","Union",
+               "Delaware","Licking","Madison","Franklin","Fairfield","Fayette","Pickaway"),
+    fips   = c("39175","39033","39065","39101","39117","39083","39091","39159",
+               "39041","39089","39097","39049","39045","39047","39129")
+  ),
+  `5` = tibble::tibble(
+    county = c("Richland","Ashland","Medina","Wayne","Holmes","Summit","Stark","Tuscarawas",
+               "Portage","Trumbull","Mahoning","Columbiana","Carroll"),
+    fips   = c("39139","39005","39103","39169","39075","39153","39151","39157",
+               "39133","39155","39099","39029","39019")
+  ),
+  `6` = tibble::tibble(
+    county = c("Butler","Warren","Clinton","Highland","Hamilton","Clermont","Brown","Adams"),
+    fips   = c("39017","39165","39027","39071","39061","39025","39015","39001")
+  ),
+  `7` = tibble::tibble(
+    county = c("Ross","Pike","Scioto","Hocking","Vinton","Jackson","Lawrence","Athens","Meigs","Gallia"),
+    fips   = c("39141","39131","39145","39073","39163","39079","39087","39009","39105","39053")
+  ),
+  `8` = tibble::tibble(
+    county = c("Coshocton","Muskingum","Perry","Morgan","Washington","Noble","Monroe",
+               "Belmont","Guernsey","Harrison","Jefferson"),
+    fips   = c("39031","39119","39127","39115","39167","39121","39111",
+               "39013","39059","39067","39081")
+  )
+)
+
+
+# ============================== Helpers (quiet) ==============================
+pick_first <- function(nms, patterns) {
+  for (p in patterns) {
+    m <- nms[stringr::str_detect(nms, stringr::regex(p, ignore_case = TRUE))]
+    if (length(m) > 0) return(m[1])
+  }
+  NA_character_
+}
+
+parse_date_any <- function(x) {
+  y <- suppressWarnings(lubridate::ymd(x))
+  if (sum(!is.na(y)) == 0) y <- suppressWarnings(lubridate::ymd_hms(x))
+  if (sum(!is.na(y)) == 0) y <- suppressWarnings(lubridate::mdy(x))
+  if (sum(!is.na(y)) == 0) y <- suppressWarnings(lubridate::mdy_hms(x))
+  y
+}
+
+score_numeric <- function(v) sum(!is.na(suppressWarnings(as.numeric(v))))
+
+roll_med <- function(x, k = smooth_window) {
+  if (k <= 1) return(x)
+  zoo::rollapply(x, k, median, fill = NA, align = "right")
+}
+
+choose_measure <- function(df, priority_regex) {
+  nms <- names(df)
+  candidates <- nms[stringr::str_detect(nms, stringr::regex(priority_regex, TRUE))]
+  if (length(candidates) == 0) candidates <- nms
+  tibble::tibble(
+    col  = candidates,
+    non_na_num = purrr::map_int(candidates, ~ score_numeric(df[[.x]])),
+    prio = dplyr::case_when(
+      stringr::str_detect(candidates, stringr::regex(priority_regex, TRUE)) ~ 1L,
+      stringr::str_detect(candidates, stringr::regex("normalized|normalised|rolling|activity|wva|percentile", TRUE)) ~ 2L,
+      stringr::str_detect(candidates, stringr::regex("conc|concen|load|signal|copies", TRUE)) ~ 3L,
+      TRUE ~ 9L
+    )
+  ) |>
+    dplyr::arrange(prio, dplyr::desc(non_na_num)) |>
+    dplyr::pull(col) |>
+    dplyr::first()
+}
+
+# Helper: render a single plot as its own executed child chunk/panel
+emit_panel <- function(plot_obj, env = parent.frame()) {
+  assign(".plot_to_emit", plot_obj, envir = env)
+  cat(knitr::knit_child(
+    text = paste(
+      "```{r}",
+      "#| echo: false",
+      "#| warning: false",
+      "#| message: false",
+      "print(.plot_to_emit)",
+      "```",
+      sep = "\n"
+    ),
+    envir = env,
+    quiet = TRUE
+  ))
+}
+
+# ---- Quiet wrapper for Socrata pulls (suppresses output/messages/warnings) ----
+quiet_read_socrata <- function(url, token) {
+  out <- NULL
+  suppressWarnings(suppressMessages({
+    # capture both stdout and 'message' channel so nothing leaks into the HTML
+    utils::capture.output(
+      {
+        out <- tryCatch(
+          RSocrata::read.socrata(url, app_token = token),
+          error = function(e) NULL
+        )
+      },
+      type = c("output", "message")
+    )
+  }))
+  if (is.null(out)) return(NULL)
+  tibble::as_tibble(out)
+}
+
+# ---------- Robust OH pull for Socrata (schema-safe, URL-encoded, quiet) ----------
+socrata_pull_ohio <- function(base, token = SOCRATA_TOKEN, state_fips_prefix = "39", state2 = "OH", state_name = "OHIO") {
+  where_clauses <- c(
+    sprintf("county_fips like '%s%%'", state_fips_prefix),
+    sprintf("fips like '%s%%'", state_fips_prefix),
+    sprintf("upper(state) = '%s'", toupper(state2)),
+    sprintf("upper(state_code) = '%s'", toupper(state2)),
+    sprintf("upper(state_name) = '%s'", toupper(state_name))
+  )
+
+  pulls <- list()
+  for (w in where_clauses) {
+    q <- paste0(
+      base, "?$select=%2A&$where=",
+      utils::URLencode(w, reserved = TRUE),
+      "&$limit=200000"
+    )
+    dat <- quiet_read_socrata(q, token)
+    if (!is.null(dat) && nrow(dat) > 0) pulls[[length(pulls) + 1]] <- dat
+  }
+
+  # If none of the server-side filters returned rows, do a full pull quietly, then filter in R
+  if (length(pulls) == 0) {
+    full_q <- paste0(base, "?$limit=200000")
+    dat <- quiet_read_socrata(full_q, token)
+    if (is.null(dat)) return(tibble::tibble())  # stay quiet; caller can handle empty
+    nms <- names(dat)
+    if ("county_fips" %in% nms) {
+      dat <- dplyr::filter(dat, stringr::str_starts(as.character(.data$county_fips), state_fips_prefix))
+    } else if ("fips" %in% nms) {
+      dat <- dplyr::filter(dat, stringr::str_starts(as.character(.data$fips), state_fips_prefix))
+    } else if ("state" %in% nms) {
+      dat <- dplyr::filter(dat, toupper(as.character(.data$state)) %in% c(state2, state_name))
+    } else if ("state_code" %in% nms) {
+      dat <- dplyr::filter(dat, toupper(as.character(.data$state_code)) == state2)
+    } else if ("state_name" %in% nms) {
+      dat <- dplyr::filter(dat, toupper(as.character(.data$state_name)) == state_name)
+    }
+    return(dat)
+  }
+
+  dplyr::bind_rows(pulls) |> dplyr::distinct()
+}
+
+
+
+
+# ============================== Plot builders ==============================
+# ED visits (vutn-jzwm) to US + State panels
+make_ed_panels <- function(raw_vutn, target_state = "OHIO") {
+  nms <- names(raw_vutn)
+  date_col <- pick_first(nms, c("^week_?end$", "^week$", "^collection_?week$", "^date$"))
+  path_col <- pick_first(nms, c("^pathogen$", "category|virus|respiratory"))
+  geo_col  <- pick_first(nms, c("^geography$", "^state$", "location"))
+  pct_col  <- pick_first(nms, c("^percent", "percentage", "pct", "percent_of"))
+  stopifnot(!is.na(date_col), !is.na(path_col), !is.na(geo_col), !is.na(pct_col))
+
+  df_all <- raw_vutn |>
+    transmute(
+      week_end  = parse_date_any(.data[[date_col]]),
+      pathogen  = as.character(.data[[path_col]]),
+      geography = toupper(as.character(.data[[geo_col]])),
+      pct       = suppressWarnings(as.numeric(str_replace_all(.data[[pct_col]], "[^0-9\\.\\-]", "")))
+    ) |>
+    filter(!is.na(week_end), !is.na(pct)) |>
+    mutate(pathogen = case_when(
+      str_detect(pathogen, regex("covid", TRUE))            ~ "COVID-19",
+      str_detect(pathogen, regex("^flu$|influenza", TRUE))  ~ "Influenza",
+      str_detect(pathogen, regex("rsv", TRUE))              ~ "RSV",
+      str_detect(pathogen, regex("combined", TRUE))         ~ "Combined",
+      TRUE ~ NA_character_
+    )) |>
+    filter(!is.na(pathogen))
+
+  nat_regex <- "^UNITED\\s+STATES$|^NATIONAL$|\\bUSA\\b|^US$|^U\\.S\\.?$"
+  nat_geos  <- unique(df_all$geography[str_detect(df_all$geography, nat_regex)])
+  stopifnot(length(nat_geos) > 0)
+  nat_geo   <- nat_geos[1]
+
+  df_us <- df_all |> filter(geography == nat_geo) |>
+    arrange(pathogen, week_end) |> group_by(pathogen) |> mutate(pct_roll = roll_med(pct)) |> ungroup()
+  df_st <- df_all |> filter(geography == toupper(target_state)) |>
+    arrange(pathogen, week_end) |> group_by(pathogen) |> mutate(pct_roll = roll_med(pct)) |> ungroup()
+  stopifnot(nrow(df_st) > 0)
+
+  y_rng <- range(c(df_us$pct, df_st$pct), na.rm = TRUE)
+  last_date <- max(c(df_us$week_end, df_st$week_end), na.rm = TRUE)
+  last_lab  <- format(last_date, "%b %d, %Y")
+
+  make_panel <- function(dat, title_txt) {
+    ggplot(dat, aes(week_end, pct, color = pathogen)) +
+      geom_point(alpha = 0.35) +
+      geom_line(aes(y = pct_roll), linewidth = 1) +
+      scale_x_date(date_breaks = "2 month", date_labels = "%b %Y") +
+      scale_y_continuous(limits = y_rng) +
+      scale_color_brewer(palette = "Dark2", name = "Series") +
+      labs(title = title_txt, subtitle = "Weekly % of ED visits by pathogen",
+           x = "Week ending", y = "Percent of ED visits") +
+      theme_minimal(base_size = 13) +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1),
+            panel.grid.minor = element_line(linetype = "dotted", linewidth = 0.5),
+            plot.title = element_text(face = "bold"))
+  }
+
+  list(
+    p_us = make_panel(df_us, paste0("United States through ", last_lab)),
+    p_state = make_panel(df_st, paste0(str_to_title(target_state), " through ", last_lab))
+  )
+}
+
+# HRD admissions (mpgq-jmmr) to 3 panels
+make_hrd_panels <- function(raw_mpgq, juris_filter, subtitle_prefix) {
+  nms <- names(raw_mpgq)
+  date_col <- if ("weekendingdate" %in% nms) "weekendingdate" else pick_first(nms, c("^week_?ending", "^week_?end", "^date$"))
+  geo_col  <- if ("jurisdiction" %in% nms) "jurisdiction" else pick_first(nms, c("^jurisdiction$", "^state$", "geograph|region|location"))
+  col_flu  <- pick_first(nms, c("^totalconfflunewadmper100k$", "total.*flu.*new.*per\\s*100k"))
+  col_c19  <- pick_first(nms, c("^totalconfc19newadmper100k$", "total.*c19.*new.*per\\s*100k", "total.*covid.*new.*per\\s*100k"))
+  col_rsv  <- pick_first(nms, c("^totalconfrsvnewadmper100k$", "total.*rsv.*new.*per\\s*100k"))
+  stopifnot(!is.na(date_col), !is.na(geo_col), !is.na(col_flu), !is.na(col_c19), !is.na(col_rsv))
+
+  df <- raw_mpgq |>
+    transmute(
+      week_end = as.Date(parse_date_any(.data[[date_col]])),
+      jurisdiction = toupper(trimws(as.character(.data[[geo_col]]))),
+      Flu        = suppressWarnings(as.numeric(.data[[col_flu]])),
+      `COVID-19` = suppressWarnings(as.numeric(.data[[col_c19]])),
+      RSV        = suppressWarnings(as.numeric(.data[[col_rsv]]))
+    ) |>
+    filter(jurisdiction %in% juris_filter, !is.na(week_end), week_end >= cutoff_date) |>
+    arrange(week_end) |>
+    mutate(
+      Flu_roll   = roll_med(Flu),
+      COVID_roll = roll_med(`COVID-19`),
+      RSV_roll   = roll_med(RSV)
+    )
+
+  last_date <- max(df$week_end, na.rm = TRUE)
+  last_lab  <- format(last_date, "%b %d, %Y")
+  y_rng <- range(c(df$Flu, df$`COVID-19`, df$RSV), na.rm = TRUE)
+
+  make_panel <- function(dat, y_col, y_roll, title_txt) {
+    ggplot(dat, aes(x = week_end)) +
+      geom_point(aes(y = .data[[y_col]]), alpha = 0.35) +
+      geom_line(aes(y = .data[[y_roll]]), linewidth = 1) +
+      scale_x_date(date_breaks = "2 month", date_labels = "%b %Y", expand = expansion(mult = c(0.01, 0.03))) +
+      scale_y_continuous(limits = y_rng) +
+      labs(title = title_txt,
+           subtitle = paste0("New admissions per 100k — ", subtitle_prefix, " — from ",
+                             format(cutoff_date, "%b %Y"), " through ", last_lab),
+           x = "Week ending", y = "Admissions per 100k") +
+      theme_minimal(base_size = 13) +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1),
+            panel.grid.minor = element_line(linetype = "dotted", linewidth = 0.5),
+            plot.title = element_text(face = "bold"))
+  }
+
+  list(
+    p_flu   = make_panel(df, "Flu", "Flu_roll", "Influenza"),
+    p_covid = make_panel(df, "COVID-19", "COVID_roll", "COVID-19"),
+    p_rsv   = make_panel(df, "RSV", "RSV_roll", "RSV")
+  )
+}
+
+# Generic wastewater prep for a cached raw + a target county list
+prep_wastewater <- function(raw, targets_tbl, meas_priority_regex) {
+  nms <- names(raw)
+  date_col   <- pick_first(nms, c("^sample_?collect_?date$", "^collection_?date$", "^sample_?date$", "^date$", "collection_?week"))
+  site_col   <- pick_first(nms, c("^sample_?location$", "wwtp_?jurisdiction", "sewershed_?name","^sewershed_?id$", "site_?name", "facility", "location"))
+  county_col <- pick_first(nms, c("^counties_?served$", "^county$", "county_?name$"))
+  fips_col   <- pick_first(nms, c("^county_?fips$", "^fips$"))
+  meas_col   <- choose_measure(raw, meas_priority_regex)
+  stopifnot(!is.na(date_col), !is.na(meas_col))
+
+  base_df <- raw |>
+    transmute(
+      sample_date = parse_date_any(.data[[date_col]]),
+      site        = if (!is.na(site_col)   && site_col   %in% nms) as.character(.data[[site_col]]) else NA_character_,
+      value_num   = suppressWarnings(as.numeric(.data[[meas_col]])),
+      counties_served_std = if (!is.na(county_col) && county_col %in% nms) toupper(as.character(.data[[county_col]])) else NA_character_,
+      fips_std    = if (!is.na(fips_col)   && fips_col   %in% nms) as.character(.data[[fips_col]]) else NA_character_
+    ) |>
+    filter(!is.na(sample_date), !is.na(value_num), sample_date >= cutoff_date)
+
+  fips_vec <- targets_tbl$fips
+  if (!all(is.na(base_df$fips_std))) {
+    df_long <- base_df |>
+      mutate(fips_std = str_replace_all(fips_std, "[^0-9, ]", "")) |>
+      separate_rows(fips_std, sep = ",\\s*") |>
+      filter(fips_std %in% fips_vec) |>
+      left_join(targets_tbl, by = c("fips_std" = "fips")) |>
+      rename(county_name = county)
+  } else if (!all(is.na(base_df$counties_served_std))) {
+    look <- targets_tbl |> mutate(pat = paste0("\\b", toupper(county), "\\b"))
+    df_long <- tidyr::crossing(base_df, look) |>
+      filter(!is.na(counties_served_std) & str_detect(counties_served_std, pat)) |>
+      transmute(sample_date, site, value_num, county_name = county, fips_std = fips)
+  } else {
+    stop("No FIPS or counties_served present to map sites to counties.")
+  }
+
+  stopifnot(nrow(df_long) > 0)
+
+  county_daily <- df_long |>
+    group_by(county_name, sample_date) |>
+    summarize(value_num = median(value_num, na.rm = TRUE), .groups = "drop") |>
+    group_by(county_name) |>
+    arrange(sample_date, .by_group = TRUE) |>
+    mutate(roll_med = roll_med(value_num, smooth_window)) |>
+    ungroup()
+
+  list(
+    county_daily = county_daily,
+    meas_col = meas_col,
+    last_date = max(df_long$sample_date, na.rm = TRUE),
+    county_levels = targets_tbl$county
+  )
+}
+
+# Plot overlay + facets for wastewater (shared y-range log10)
+plot_ww <- function(ww_list, title_prefix) {
+  county_daily_pos <- ww_list$county_daily |> filter(value_num > 0)
+  stopifnot(nrow(county_daily_pos) > 0)
+  y_rng <- range(county_daily_pos$value_num, na.rm = TRUE)
+  pretty_y <- str_to_title(gsub("_", " ", ww_list$meas_col))
+  last_date_label <- format(ww_list$last_date, "%b %d, %Y")
+  ncol_facets <- if (length(ww_list$county_levels) <= 8) 2 else 3
+
+  p_overlay <- ggplot(county_daily_pos, aes(sample_date, value_num, color = county_name)) +
+    geom_point(color="lightblue") +
+    geom_line(aes(y = roll_med), color="blue") +
+    scale_y_log10(limits = y_rng) +
+    scale_x_date(date_breaks = "2 month", date_labels = "%b %Y", limits = c(cutoff_date, NA)) +
+    labs(
+      title    = paste0(title_prefix, " through ", last_date_label),
+      subtitle = paste0(pretty_y, " • Points = daily/weekly county median"),
+      x = "Sample / collection date",
+      y = pretty_y,
+      color = "County"
+    ) +
+    theme_minimal(base_size = 13) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          panel.grid.minor = element_line(linetype = "dotted", linewidth = 0.6),
+          panel.grid.major = element_line(linewidth = 0.6),
+          plot.title       = element_text(face = "bold"),
+          legend.position  = "bottom")
+
+  p_facets <- ggplot(county_daily_pos, aes(sample_date, value_num)) +
+    geom_point(color="lightblue") +
+    geom_line(aes(y = roll_med), color="blue") +
+    facet_wrap(~ county_name, ncol = ncol_facets) +
+    scale_y_log10(limits = y_rng) +
+    scale_x_date(date_breaks = "2 month", date_labels = "%b %Y", limits = c(cutoff_date, NA)) +
+    labs(
+      title    = paste0(title_prefix, " by county"),
+      subtitle = paste0(pretty_y, " • Points = daily/weekly median"),
+      x = "Sample / collection date",
+      y = pretty_y
+    ) +
+    theme_minimal(base_size = 13) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          panel.grid.minor = element_line(linetype = "dotted", linewidth = 0.6),
+          panel.grid.major = element_line(linewidth = 0.6),
+          strip.text       = element_text(face = "bold"),
+          plot.title       = element_text(face = "bold"))
+
+  list(overlay = p_overlay, facets = p_facets)
+}
+
+
+```
+
+```{r} 
+
+#| echo: false
+#| warning: false
+#| message: false
+#| cache: true
+# ============================== One-time data loads (cached) ==============================
+DATA <- new.env(parent = emptyenv())
+
+# ED visits % by pathogen (vutn-jzwm)
+DATA$vutn <- RSocrata::read.socrata(
+  "https://data.cdc.gov/resource/vutn-jzwm.json?$limit=200000",
+  app_token = SOCRATA_TOKEN
+) |> as_tibble()
+
+# HRD new admissions per 100k (mpgq-jmmr)
+DATA$mpgq <- RSocrata::read.socrata(
+  "https://data.cdc.gov/resource/mpgq-jmmr.json?$limit=200000",
+  app_token = SOCRATA_TOKEN
+) |> as_tibble()
+
+# Wastewater (robust Ohio-only pulls using helper)
+DATA$j9g8_oh <- socrata_pull_ohio("https://data.cdc.gov/resource/j9g8-acpt.json")
+DATA$ymmh_oh <- socrata_pull_ohio("https://data.cdc.gov/resource/ymmh-divb.json")
+DATA$x45cq_oh <- socrata_pull_ohio("https://data.cdc.gov/resource/45cq-cw4i.json")
+
+stopifnot(nrow(DATA$vutn) > 0, nrow(DATA$mpgq) > 0)
+
+```
+
+# United States
+
+## Row {height = 50%}
+
+```{r}
+
+#| echo: false
+ed_panels <- make_ed_panels(DATA$vutn, target_state = target_state)
+p_us <- ed_panels$p_us
+p_oh <- ed_panels$p_state
+
+print(p_us)
+
+
+```
+
+```{r} 
+#| echo: false
+nat_regex <- "^UNITED\\s*STATES$|^NATIONAL$|\\bUSA\\b|^US$|^U\\.S\\.?$"
+all_geo <- unique(toupper(trimws(as.character(DATA$mpgq$jurisdiction))))
+nat_geo <- if (any(grepl(nat_regex, all_geo, ignore.case = TRUE))) {
+  all_geo[grepl(nat_regex, all_geo, ignore.case = TRUE)][1]
+} else "US"
+
+hrd_us <- make_hrd_panels(DATA$mpgq, juris_filter = nat_geo, subtitle_prefix = "United States")
+print(hrd_us$p_covid)
+
+```
+
+## Row {height = 50%}
+
+```{r} 
+
+#| echo: false
+print(hrd_us$p_flu)
+
+
+```
+
+```{r}
+
+#| echo: false
+
+print(hrd_us$p_rsv)
+
+
+```
+
+# Ohio
+
+## Row {height = 50%}
+
+```{r} 
+
+#| echo: false
+print(p_oh)
+
+
+```
+
+```{r} 
+
+#| echo: false
+
+hrd_oh <- make_hrd_panels(DATA$mpgq, juris_filter = "OH", subtitle_prefix = "Ohio")
+print(hrd_oh$p_covid)
+
+```
+
+## Row {height = 50%}
+
+```{r} 
+#| echo: false
+print(hrd_oh$p_flu)
+
+```
+
+```{r} 
+#| echo: false
+hrd_oh <- make_hrd_panels(DATA$mpgq, juris_filter = "OH", subtitle_prefix = "Ohio")
+print(hrd_oh$p_rsv)
+
+```
+
+# Southwest Ohio (Region 6)
+
+## Row {height = 50%}
+
+```{r}
+#| echo: false
+print("Other interesting data will go here")
+
+```
+
+```{r}
+#| echo: false
+targets_6_bh <- tibble::tibble(county = c("Butler","Hamilton"), fips = c("39017","39061"))
+ww_cov_6 <- prep_wastewater(DATA$j9g8_oh, targets_6_bh,
+                            "sars|cov|n1|n2|target|normalized|normalised|rolling|conc|concen|load|signal|copies")
+plots_cov_6 <- plot_ww(ww_cov_6, "SARS-CoV-2 in wastewater (Region 6)")
+print(plots_cov_6$overlay)
+
+```
+
+## Row {height = 50%}
+
+```{r}
+#| echo: false
+targets_6 <- regions[["6"]]
+ww_fluA_6 <- prep_wastewater(DATA$ymmh_oh, targets_6,
+                             "influenza|\\bflu\\b|\\biav\\b|influenza[_\\s-]*a|normalized|normalised|rolling|activity|wva|percentile|conc|concen|load|signal|copies")
+plots_fluA_6 <- plot_ww(ww_fluA_6, "Influenza A in wastewater (Region 6)")
+print(plots_fluA_6$overlay)
+
+```
+
+
+```{r}
+#| echo: false
+ww_rsv_6 <- prep_wastewater(DATA$x45cq_oh, targets_6,
+                            "\\brsv\\b|respiratory\\s*syncytial|normalized|normalised|rolling|activity|wva|percentile|conc|concen|load|signal|copies")
+plots_rsv_6 <- plot_ww(ww_rsv_6, "RSV in wastewater (Region 6)")
+print(plots_rsv_6$overlay)
+
+```
+
+
+
+
+
+
+```{r}
+#| echo: false
+#| results: asis
+# Assumes `emit_panel()` (using knit_child) is already defined above, and libraries are loaded.
+
+# ========== Regions: 2 rows × 3 columns ==========
+# Top row: aggregated overlays for SARS-CoV-2, Influenza A, RSV
+# Bottom row: per-county facets for SARS-CoV-2, Influenza A, RSV
+# This chunk must have results: asis so the child chunks become panels.
+#| echo: false
+#| results: asis
+for (rid in as.integer(names(regions))) {
+  cat(sprintf("\n\n# Region %d\n\n", rid))
+  targets_tbl <- regions[[as.character(rid)]]
+
+  # Build plots for all three pathogens
+  ww_cov <- prep_wastewater(
+    raw = DATA$j9g8_oh,
+    targets_tbl = targets_tbl,
+    meas_priority_regex = "sars|cov|n1|n2|target|normalized|normalised|rolling|conc|concen|load|signal|copies"
+  )
+  plots_cov <- plot_ww(ww_cov, sprintf("SARS-CoV-2 in wastewater (Region %d)", rid))
+
+  ww_flu <- prep_wastewater(
+    raw = DATA$ymmh_oh,
+    targets_tbl = targets_tbl,
+    meas_priority_regex = "influenza|\\bflu\\b|\\biav\\b|influenza[_\\s-]*a|normalized|normalised|rolling|activity|wva|percentile|conc|concen|load|signal|copies"
+  )
+  plots_flu <- plot_ww(ww_flu, sprintf("Influenza A in wastewater (Region %d)", rid))
+
+  ww_rsv <- prep_wastewater(
+    raw = DATA$x45cq_oh,
+    targets_tbl = targets_tbl,
+    meas_priority_regex = "\\brsv\\b|respiratory\\s*syncytial|normalized|normalised|rolling|activity|wva|percentile|conc|concen|load|signal|copies"
+  )
+  plots_rsv <- plot_ww(ww_rsv, sprintf("RSV in wastewater (Region %d)", rid))
+
+  # Row 1 (top): overlays
+  cat("## Row {height=50%}\n\n")
+  emit_panel(plots_cov$overlay)  # col 1
+  emit_panel(plots_flu$overlay)  # col 2
+  emit_panel(plots_rsv$overlay)  # col 3
+
+  # Row 2 (bottom): facets
+  cat("\n\n## Row {height=50%}\n\n")
+  emit_panel(plots_cov$facets)   # col 1
+  emit_panel(plots_flu$facets)   # col 2
+  emit_panel(plots_rsv$facets)   # col 3
+}
+
+
+```
+
