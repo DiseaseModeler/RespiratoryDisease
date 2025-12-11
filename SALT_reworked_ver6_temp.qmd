@@ -31,6 +31,7 @@ suppressPackageStartupMessages({
   library(knitr)
   library(plotly)          # <-- adds interactivity
   library(openxlsx)
+  library(dplyr)
 })
 
 # --------------------------------------------------------------
@@ -737,49 +738,166 @@ hrd_oh$p_rsv
 
 ```{r}
 #| echo: false
-# Lab results from local Excel file – COVID & influenza positivity
-the_file  <- "C:/Users/david/Dropbox/CCHMC/SALT/RespiratoryDisease/WEEKLY_Output_to_CCHMC_SALT/toy_Output_to_CCHMC_SALT-Weekly-LabResults_202511_v01.xlsx"
-the_sheet <- "SALT-Weekly-Labs-Aggregate"
 
+#========= Labs data ==============
+#========= Labs data ==============
+
+the_file <- "C:/Users/david/Dropbox/CCHMC/SALT/RespiratoryDisease/WEEKLY_Output_to_CCHMC_SALT/toy_Output_to_CCHMC_SALT-Weekly-LabResults_202511_v01.xlsx"
+the_sheet <- "SALT-Weekly-Labs-Aggregate"
 df_lab <- read.xlsx(the_file, sheet = the_sheet)
 
-df_lab[df_lab == "redacted"] <- NA
+df_lab$WEEK_ENDING_DATE <- as.Date(df_lab$WEEK_ENDING_DATE, 
+                                   origin = "1899-12-30")
+#df_lab$WEEK_ENDING_DATE <- format(df_lab$WEEK_ENDING_DATE, "%m/%d/%Y")
 
-df_lab$WEEK_ENDING_DATE <- as.Date(df_lab$WEEK_ENDING_DATE, origin = "1899-12-30")
+cols_to_fix <- sapply(df_lab, is.character)
+df_lab[cols_to_fix] <- lapply(df_lab[cols_to_fix], function(x) {
+  x[x == "redacted"] <- NA
+  x
+})
 
-df_lab$TOTAL_LAB_TESTS_POSITIVE_COVID      <- as.numeric(df_lab$TOTAL_LAB_TESTS_POSITIVE_COVID)
-df_lab$TOTAL_LAB_TESTS_ADMINISTERED_COVID  <- as.numeric(df_lab$TOTAL_LAB_TESTS_ADMINISTERED_COVID)
-df_lab$TOTAL_LAB_TESTS_UNRESULTED_COVID    <- as.numeric(df_lab$TOTAL_LAB_TESTS_UNRESULTED_COVID)
+#df_lab[df_lab == "redacted"] <- NA
 
-covid_proportion <- df_lab$TOTAL_LAB_TESTS_POSITIVE_COVID /
+#----------- metrics ----------------
+df_lab$TOTAL_LAB_TESTS_POSITIVE_COVID <- as.numeric(df_lab$TOTAL_LAB_TESTS_POSITIVE_COVID)
+df_lab$TOTAL_LAB_TESTS_ADMINISTERED_COVID <- as.numeric(df_lab$TOTAL_LAB_TESTS_ADMINISTERED_COVID)
+df_lab$TOTAL_LAB_TESTS_UNRESULTED_COVID <- as.numeric(df_lab$TOTAL_LAB_TESTS_UNRESULTED_COVID)
+
+covid_proportion <- 100*df_lab$TOTAL_LAB_TESTS_POSITIVE_COVID/
   (df_lab$TOTAL_LAB_TESTS_ADMINISTERED_COVID - df_lab$TOTAL_LAB_TESTS_UNRESULTED_COVID)
 
-df_lab$TOTAL_LAB_TESTS_POSITIVE_INFLUENZA      <- as.numeric(df_lab$TOTAL_LAB_TESTS_POSITIVE_INFLUENZA)
-df_lab$TOTAL_LAB_TESTS_ADMINISTERED_INFLUENZA  <- as.numeric(df_lab$TOTAL_LAB_TESTS_ADMINISTERED_INFLUENZA)
-df_lab$TOTAL_LAB_TESTS_UNRESULTED_INFLUENZA    <- as.numeric(df_lab$TOTAL_LAB_TESTS_UNRESULTED_INFLUENZA)
+df_lab$TOTAL_LAB_TESTS_POSITIVE_INFLUENZA <- as.numeric(df_lab$TOTAL_LAB_TESTS_POSITIVE_INFLUENZA)
+df_lab$TOTAL_LAB_TESTS_ADMINISTERED_INFLUENZA <- as.numeric(df_lab$TOTAL_LAB_TESTS_ADMINISTERED_INFLUENZA)
+df_lab$TOTAL_LAB_TESTS_UNRESULTED_INFLUENZA <- as.numeric(df_lab$TOTAL_LAB_TESTS_UNRESULTED_INFLUENZA)
 
-influenza_proportion <- df_lab$TOTAL_LAB_TESTS_POSITIVE_INFLUENZA /
+influenza_proportion <- 100*df_lab$TOTAL_LAB_TESTS_POSITIVE_INFLUENZA/
   (df_lab$TOTAL_LAB_TESTS_ADMINISTERED_INFLUENZA - df_lab$TOTAL_LAB_TESTS_UNRESULTED_INFLUENZA)
 
-the_df <- data.frame(
-  date       = df_lab$WEEK_ENDING_DATE,
-  covid_prop = covid_proportion,
-  flu_prop   = influenza_proportion
+the_df_labs <- data.frame(covid_prop = covid_proportion, flu_prop=influenza_proportion, date=as.Date(df_lab$WEEK_ENDING_DATE))
+
+#========= Occupancy data ==============
+
+the_file <- "C:/Users/david/Dropbox/CCHMC/SALT/RespiratoryDisease/WEEKLY_Output_to_CCHMC_SALT/Output_to_CCHMC_SALT-Weekly-HospOccupancy_202511_v01.xlsx"
+the_sheet <- "SALT-Weekly-HospOcc-Aggregate"
+df_occ <- read.xlsx(the_file, sheet = the_sheet)
+
+df_occ$WEEK_ENDING_DATE <- as.Date(df_occ$WEEK_ENDING_DATE, origin = "1899-12-30")
+#df_occ$WEEK_ENDING_DATE <- format(df_occ$WEEK_ENDING_DATE, "%m/%d/%Y")
+#df_occ[df_occ == "redacted"] <- NA
+
+cols_to_fix <- sapply(df_occ, is.character)
+df_occ[cols_to_fix] <- lapply(df_occ[cols_to_fix], function(x) {
+  x[x == "redacted"] <- NA
+  x
+})
+
+
+#========= Capacity data ==============
+
+the_file <- "C:/Users/david/Dropbox/CCHMC/SALT/RespiratoryDisease/WEEKLY_Output_to_CCHMC_SALT/Output_to_CCHMC_SALT-Weekly-HospCapacity_202511_v02.xlsx"
+the_sheet <- "SALT-Weekly-HospCap-Aggregate"
+df_cap <- read.xlsx(the_file, sheet = the_sheet)
+
+df_cap$WEEK_ENDING_DATE <- as.Date(df_cap$WEEK_ENDING_DATE, origin = "1899-12-30")
+#df_cap$WEEK_ENDING_DATE <- format(df_cap$WEEK_ENDING_DATE, "%m/%d/%Y")
+#df_cap[df_cap == "redacted"] <- NA
+
+cols_to_fix <- sapply(df_cap, is.character)
+df_cap[cols_to_fix] <- lapply(df_cap[cols_to_fix], function(x) {
+  x[x == "redacted"] <- NA
+  x
+})
+
+#========= Merge, joining on dates ========
+
+df_merged <- inner_join(df_occ, df_cap, by = "WEEK_ENDING_DATE")
+
+df_merged[ , 6:ncol(df_merged)] <- lapply(df_merged[ , 6:ncol(df_merged)], 
+                                          function(x) as.numeric(x))
+
+
+#----------- metrics ----------------
+#---------- flu ----------
+
+#frac_beds_occ <- df_merged$NUM_IN_PT_BEDS_OCC/df_merged$NUM_IN_PT_BEDS
+
+frac_beds_occ_flu_icu <- 100*(df_merged$NUM_CONF_FLU_ICU_PATS_ADULT + df_merged$NUM_CONF_FLU_ICU_PATS_PED)/
+  (df_merged$NUM_ICU_BEDS_ADULT + df_merged$NUM_ICU_BEDS_PED)
+
+frac_beds_occ_flu <- 100*(df_merged$NUM_CONF_FLU_HOSP_PATS_ADULT + df_merged$NUM_CONF_FLU_HOSP_PATS_PED)/
+  (df_merged$NUM_IN_PT_BEDS_ADULT + df_merged$NUM_IN_PT_BEDS_PED)
+
+#---------- C19 ----------
+
+frac_beds_occ_C19_icu <- 100*(df_merged$NUM_CONF_C19_ICU_PATS_ADULT + df_merged$NUM_CONF_C19_ICU_PATS_PED)/
+  (df_merged$NUM_ICU_BEDS_ADULT + df_merged$NUM_ICU_BEDS_PED)
+
+frac_beds_occ_C19 <- 100*(df_merged$NUM_CONF_C19_HOSP_PATS_ADULT + df_merged$NUM_CONF_C19_HOSP_PATS_PED)/
+  (df_merged$NUM_IN_PT_BEDS_ADULT + df_merged$NUM_IN_PT_BEDS_PED)
+
+#---------------------
+# make data frames for (1) general beds and (2) ICU beds, 
+#  each for COVID and flu
+
+# 1. Hospital bed occupancy (non-ICU)
+df_occ_gen <- data.frame(
+  date               = as.Date(df_merged$WEEK_ENDING_DATE),
+  frac_beds_occ_flu  = frac_beds_occ_flu,
+  frac_beds_occ_C19  = frac_beds_occ_C19
 )
 
+# 2. ICU occupancy
+df_occ_ICU <- data.frame(
+  date                   = as.Date(df_merged$WEEK_ENDING_DATE),
+  frac_beds_occ_flu_icu  = frac_beds_occ_flu_icu,
+  frac_beds_occ_C19_icu  = frac_beds_occ_C19_icu
+)
+
+#----------- ED C19 metric ----------------
+
+prop_ED_c19 <- 100*df_merged$NUM_ED_VISITS_COVID_RELATED/df_merged$NUM_ED_VISITS
+
+df_ED <- data.frame(
+  date         = as.Date(df_merged$WEEK_ENDING_DATE),
+  frac_ED_c19  = prop_ED_c19
+)
+
+```
+
+```{r}
+#| echo: false
+p_ED_c19 <- ggplot(df_ED, aes(x = date)) +
+  geom_point(aes(y = frac_ED_c19, colour = "COVID-19")) +   
+  scale_x_date(date_breaks = "1 week", date_labels = "%m/%d/%Y") +  
+  scale_y_continuous(limits = c(0, 20)) +     
+  scale_colour_manual(
+    values = c(
+      "COVID-19"  = "#D95F02"   # same orange as other tabs
+    ),
+    breaks = c("COVID-19"),
+    name   = "Pathogen"
+  ) +
+  labs(
+    title   = "Proportion of ED Visits Associated with COVID-19",
+    x       = "Week ending",
+    y       = "Percent occupied",
+    colour  = "Pathogen"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+gg_to_plotly(p_ED_c19)
 
 ```
 
 ```{r}
 #| echo: false
 # Lab-based COVID & influenza positivity (CCHMC SALT toy data)
-p_lab <- ggplot(the_df, aes(x = date)) +
-  geom_line(aes(y = covid_prop, colour = "COVID-19"), na.rm = TRUE) +
-  geom_line(aes(y = flu_prop,   colour = "Influenza"), na.rm = TRUE) +
-  geom_point(aes(y = covid_prop, colour = "COVID-19")) +   # ← CHANGED
-  geom_point(aes(y = flu_prop,   colour = "Influenza")) +  # ← CHANGED
-  scale_x_date(date_breaks = "1 month", date_labels = "%b %Y") +
-  scale_y_continuous(limits = c(0, 1)) +     # ← ADD THIS LINE
+p_lab <- ggplot(the_df_labs, aes(x = date)) +
+  geom_point(aes(y = covid_prop, colour = "COVID-19")) +   
+  geom_point(aes(y = flu_prop,   colour = "Influenza")) +  
+  scale_x_date(date_breaks = "1 week", date_labels = "%m/%d/%Y") +
+  scale_y_continuous(limits = c(0, 100)) +     
   scale_colour_manual(
     values = c(
       "Influenza" = "#1B9E77",  # same green as other tabs
@@ -789,7 +907,7 @@ p_lab <- ggplot(the_df, aes(x = date)) +
     name   = "Pathogen"
   ) +
   labs(
-    title   = "Lab test positivity (CCHMC SALT toy data)",
+    title   = "Lab Test Positivity",
     x       = "Week ending",
     y       = "Proportion positive",
     colour  = "Pathogen"
@@ -801,37 +919,65 @@ gg_to_plotly(p_lab)
 
 ```
 
-```{r}
-#| echo: false
-targets_6_bh <- tibble::tibble(county = c("Butler","Hamilton"),
-                               fips   = c("39017","39061"))
-ww_cov_6 <- prep_wastewater(DATA$j9g8_oh, targets_6_bh,
-                            "sars|cov|n1|n2|target|normalized|normalised|rolling|conc|concen|load|signal|copies")
-plots_cov_6 <- plot_ww(ww_cov_6, "SARS‑CoV‑2 in wastewater (Region 6)")
-plots_cov_6$overlay
-
-```
-
 ## Row {height = 50%}
 
 ```{r}
 #| echo: false
-targets_6 <- regions[["6"]]
-ww_fluA_6 <- prep_wastewater(DATA$ymmh_oh, targets_6,
-                             "influenza|\\bflu\\b|\\biav\\b|influenza[_\\s-]*a|normalized|normalised|rolling|activity|wva|percentile|conc|concen|load|signal|copies")
-plots_fluA_6 <- plot_ww(ww_fluA_6, "Influenza A in wastewater (Region 6)")
-plots_fluA_6$overlay
+p_gen_beds <- ggplot(df_occ_gen, aes(x = date)) +
+  geom_point(aes(y = frac_beds_occ_C19, colour = "COVID-19")) +   
+  geom_point(aes(y = frac_beds_occ_flu,   colour = "Influenza")) +  
+  scale_x_date(date_breaks = "1 week", date_labels = "%m/%d/%Y") +
+  scale_y_continuous(limits = c(0, 50)) +     
+  scale_colour_manual(
+    values = c(
+      "Influenza" = "#1B9E77",  # same green as other tabs
+      "COVID-19"  = "#D95F02"   # same orange as other tabs
+    ),
+    breaks = c("Influenza", "COVID-19"),
+    name   = "Pathogen"
+  ) +
+  labs(
+    title   = "Proportion of All Beds Occupied by Pathogen",
+    x       = "Week ending",
+    y       = "Percent occupied",
+    colour  = "Pathogen"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+gg_to_plotly(p_gen_beds)
 
 ```
 
 ```{r}
 #| echo: false
-ww_rsv_6 <- prep_wastewater(DATA$x45cq_oh, targets_6,
-                            "\\brsv\\b|respiratory\\s*syncytial|normalized|normalised|rolling|activity|wva|percentile|conc|concen|load|signal|copies")
-plots_rsv_6 <- plot_ww(ww_rsv_6, "RSV in wastewater (Region 6)")
-plots_rsv_6$overlay
+p_icu_beds <- ggplot(df_occ_ICU, aes(x = date)) +
+  geom_point(aes(y = frac_beds_occ_C19_icu, colour = "COVID-19")) +   
+  geom_point(aes(y = frac_beds_occ_flu_icu,   colour = "Influenza")) +  
+  scale_x_date(date_breaks = "1 week", date_labels = "%m/%d/%Y") +  
+  scale_y_continuous(limits = c(0, 50)) +     
+  scale_colour_manual(
+    values = c(
+      "Influenza" = "#1B9E77",  # same green as other tabs
+      "COVID-19"  = "#D95F02"   # same orange as other tabs
+    ),
+    breaks = c("Influenza", "COVID-19"),
+    name   = "Pathogen"
+  ) +
+  labs(
+    title   = "Proportion of ICU Beds Occupied by Pathogen",
+    x       = "Week ending",
+    y       = "Percent occupied",
+    colour  = "Pathogen"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+gg_to_plotly(p_icu_beds)
 
 ```
+
+
 
 ```{r}
 #| echo: false
