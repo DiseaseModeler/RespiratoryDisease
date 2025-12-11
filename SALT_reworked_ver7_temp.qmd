@@ -732,7 +732,7 @@ hrd_oh$p_rsv
 
 ```
 
-# Southwest Ohio (Region 6 Hospitals)
+# Southwest Ohio (Mockup: Region 6 Hospitals)
 
 ## Row {height = 50%}
 
@@ -741,7 +741,7 @@ hrd_oh$p_rsv
 
 #========= Labs data ==============
 
-the_file <- "C:/Users/david/Dropbox/CCHMC/SALT/RespiratoryDisease/WEEKLY_Output_to_CCHMC_SALT/toy_Output_to_CCHMC_SALT-Weekly-LabResults_202511_v01.xlsx"
+the_file <- "C:/Users/david/Dropbox/CCHMC/SALT/RespiratoryDisease/WEEKLY_Output_to_CCHMC_SALT/Output_to_CCHMC_SALT-Weekly-LabResults_202511_v01.xlsx"
 the_sheet <- "SALT-Weekly-Labs-Aggregate"
 df_lab <- read.xlsx(the_file, sheet = the_sheet)
 
@@ -864,6 +864,15 @@ df_ED <- data.frame(
 
 ```{r}
 #| echo: false
+sat_breaks <- function(x) {
+  rng <- range(x, na.rm = TRUE)
+  first <- rng[1]
+  # base R: 0 = Sunday, ..., 6 = Saturday
+  w <- as.POSIXlt(first)$wday
+  first_sat <- first + ((6 - w) %% 7)
+  seq(first_sat, rng[2], by = 7)  # every 7 days from first Saturday
+}
+
 p_ED_c19 <- ggplot(df_ED, aes(x = date)) +
   geom_point(
     aes(
@@ -877,7 +886,10 @@ p_ED_c19 <- ggplot(df_ED, aes(x = date)) +
       )
     )
   ) +
-  scale_x_date(date_breaks = "1 week", date_labels = "%m/%d/%Y") +
+  scale_x_date(
+    breaks      = sat_breaks(df_occ_gen$date),
+    #date_breaks = "1 week", 
+    date_labels = "%m/%d/%Y") +
   scale_y_continuous(limits = c(0, 20)) +
   scale_colour_manual(
     values = c("COVID-19" = "#D95F02"),
@@ -900,6 +912,15 @@ gg_to_plotly(p_ED_c19)
 ```{r}
 #| echo: false
 # Lab-based COVID & influenza positivity (CCHMC SALT toy data)
+sat_breaks <- function(x) {
+  rng <- range(x, na.rm = TRUE)
+  first <- rng[1]
+  # base R: 0 = Sunday, ..., 6 = Saturday
+  w <- as.POSIXlt(first)$wday
+  first_sat <- first + ((6 - w) %% 7)
+  seq(first_sat, rng[2], by = 7)  # every 7 days from first Saturday
+}
+
 p_lab <- ggplot(the_df_labs, aes(x = date)) +
   geom_point(
     aes(
@@ -925,7 +946,10 @@ p_lab <- ggplot(the_df_labs, aes(x = date)) +
       )
     )
   ) +
-  scale_x_date(date_breaks = "1 week", date_labels = "%m/%d/%Y") +
+  scale_x_date(
+    breaks      = sat_breaks(df_occ_gen$date),
+    #date_breaks = "1 week", 
+    date_labels = "%m/%d/%Y") +
   scale_y_continuous(limits = c(0, 100)) +
   scale_colour_manual(
     values = c(
@@ -952,6 +976,15 @@ gg_to_plotly(p_lab)
 
 ```{r}
 #| echo: false
+sat_breaks <- function(x) {
+  rng <- range(x, na.rm = TRUE)
+  first <- rng[1]
+  # base R: 0 = Sunday, ..., 6 = Saturday
+  w <- as.POSIXlt(first)$wday
+  first_sat <- first + ((6 - w) %% 7)
+  seq(first_sat, rng[2], by = 7)  # every 7 days from first Saturday
+}
+
 p_gen_beds <- ggplot(df_occ_gen, aes(x = date)) +
   geom_point(
     aes(
@@ -977,7 +1010,10 @@ p_gen_beds <- ggplot(df_occ_gen, aes(x = date)) +
       )
     )
   ) +
-  scale_x_date(date_breaks = "1 week", date_labels = "%m/%d/%Y") +
+  scale_x_date(
+    breaks      = sat_breaks(df_occ_gen$date),
+    #date_breaks = "1 week", 
+    date_labels = "%m/%d/%Y") +
   scale_y_continuous(limits = c(0, 50)) +
   scale_colour_manual(
     values = c(
@@ -1002,6 +1038,15 @@ gg_to_plotly(p_gen_beds)
 
 ```{r}
 #| echo: false
+sat_breaks <- function(x) {
+  rng <- range(x, na.rm = TRUE)
+  first <- rng[1]
+  # base R: 0 = Sunday, ..., 6 = Saturday
+  w <- as.POSIXlt(first)$wday
+  first_sat <- first + ((6 - w) %% 7)
+  seq(first_sat, rng[2], by = 7)  # every 7 days from first Saturday
+}
+
 p_icu_beds <- ggplot(df_occ_ICU, aes(x = date)) +
   geom_point(
     aes(
@@ -1027,7 +1072,10 @@ p_icu_beds <- ggplot(df_occ_ICU, aes(x = date)) +
       )
     )
   ) +
-  scale_x_date(date_breaks = "1 week", date_labels = "%m/%d/%Y") +
+  scale_x_date(
+    breaks      = sat_breaks(df_occ_gen$date),
+    #date_breaks = "1 week", 
+    date_labels = "%m/%d/%Y") +
   scale_y_continuous(limits = c(0, 50)) +
   scale_colour_manual(
     values = c(
